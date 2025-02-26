@@ -4,16 +4,15 @@ namespace WebHookConsumer
     {
         public static void Main(string[] args)
         {
+
             var builder = WebApplication.CreateBuilder(args);
 
-            // Add services to the container.
-
+            // Add services to the container
             builder.Services.AddControllers();
-            // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen();
 
-            // Configure HttpClientFactory with ProducerApi 
+            // Configure HttpClientFactory with ProducerApi and SSL bypass for development
             builder.Services.AddHttpClient("ProducerApi", client =>
             {
                 // Get the Producer base URL from configuration
@@ -22,9 +21,6 @@ namespace WebHookConsumer
 
                 client.BaseAddress = new Uri(producerUrl);
                 client.DefaultRequestHeaders.Add("Accept", "application/json");
-
-                // You can add more default headers here if needed
-                // client.DefaultRequestHeaders.Add("X-API-Key", builder.Configuration["ProducerApi:ApiKey"]);
             })
             .ConfigurePrimaryHttpMessageHandler(() =>
             {
@@ -43,18 +39,17 @@ namespace WebHookConsumer
 
             var app = builder.Build();
 
-            // Configure the HTTP request pipeline.
+            // Configure the HTTP request pipeline
             if (app.Environment.IsDevelopment())
             {
                 app.UseSwagger();
                 app.UseSwaggerUI();
             }
 
-            app.UseHttpsRedirection();
+            // Comment out HttpsRedirection for local development if needed
+            // app.UseHttpsRedirection();
 
             app.UseAuthorization();
-
-
             app.MapControllers();
 
             app.Run();

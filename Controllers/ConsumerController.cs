@@ -1,7 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Svix;
-using Svix.Model;
 using System.Net;
+using System.Text;
 using System.Text.Json;
 
 namespace Consumer.Controllers
@@ -29,27 +29,17 @@ namespace Consumer.Controllers
         {
             try
             {
-                // Generate a webhook secret
-                var secret = Guid.NewGuid().ToString("N");
-
-                // Save the secret in your application for later verification
-                // In a production app, you would store this securely
-                // For demo purposes, we'll just log it
-                _logger.LogInformation($"Generated webhook secret: {secret}");
-
                 // Determine the consumer's webhook URL
                 var baseUrl = _configuration["ConsumerApp:BaseUrl"] ?? $"{Request.Scheme}://{Request.Host}";
                 var webhookEndpoint = $"{baseUrl}/api/consumer/receive-webhook";
 
-                // Create subscription request
+                // Create subscription request - let Svix generate the secret
                 var subscriptionRequest = new
                 {
                     ConsumerId = settings.ConsumerId ?? "default-consumer",
                     WebhookUrl = webhookEndpoint,
-                    Secret = secret
+                    Secret = "" // Empty string - Svix will generate a valid secret
                 };
-
-                _logger.LogInformation($"Sending subscription request to producer: {JsonSerializer.Serialize(subscriptionRequest)}");
 
                 // Send subscription request to the producer
                 var response = await _httpClient.PostAsJsonAsync(
@@ -69,7 +59,6 @@ namespace Consumer.Controllers
                     Success = true,
                     EndpointId = result?.EndpointId,
                     WebhookUrl = webhookEndpoint,
-                    Secret = secret,
                     Message = "Successfully subscribed to webhooks"
                 });
             }
@@ -80,26 +69,49 @@ namespace Consumer.Controllers
             }
         }
 
-        [HttpPost("receive-webhook")]
-        public async Task<IActionResult> ReceiveWebhook()
+        [HttpDelete("unsubscribe")]
+        public async Task<IActionResult> Unsubscribe(string endpointId)
         {
             try
             {
-                // Get the webhook secret from configuration or database
+                // Send unsubscription request to the producer
+                var response = await _httpClient.DeleteAsync(
+                    $"api/producer/unsubscribe?endpointId={endpointId}");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    return BadRequest(new { Success = false, Message = $"Failed to unsubscribe: {errorContent}" });
+                }
+
+                return Ok(new { Success = true, Message = "Successfully unsubscribed from webhooks" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error unsubscribing from webhooks");
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpPost("receive-webhook")]
+        public async Task<IActionResult> ReceiveWebhook([FromBody] JsonElement body)
+        {
+            try
+            {
                 var secret = _configuration["Webhook:Secret"];
 
                 if (string.IsNullOrEmpty(secret))
                 {
-                    _logger.LogWarning("No webhook secret configured!");
                     return BadRequest(new { Success = false, Message = "Webhook secret not configured" });
                 }
 
-                // Verify the webhook signature
+                // Get the Svix headers
                 var svixHeaders = Request.Headers
                     .Where(h => h.Key.StartsWith("svix-", StringComparison.OrdinalIgnoreCase))
                     .ToDictionary(h => h.Key, h => h.Value.ToString());
 
-                var payload = await new StreamReader(Request.Body).ReadToEndAsync();
+                var payload = JsonSerializer.Serialize(body);
+                _logger.LogInformation("Received webhook payload: {Payload}", payload);
 
                 try
                 {
@@ -120,9 +132,6 @@ namespace Consumer.Controllers
                 // Process the webhook
                 var webhookData = JsonSerializer.Deserialize<WebhookPayload>(payload);
 
-                // Log the received webhook
-                _logger.LogInformation($"Received webhook: {webhookData?.EventType}");
-
                 // Process the webhook based on event type
                 await ProcessWebhookAsync(webhookData);
 
@@ -133,6 +142,12 @@ namespace Consumer.Controllers
                 _logger.LogError(ex, "Error processing webhook");
                 return BadRequest(new { Success = false, Message = ex.Message });
             }
+        }
+
+        [HttpGet("test")]
+        public IActionResult Test()
+        {
+            return Ok("Test successful");
         }
 
         private async Task ProcessWebhookAsync(WebhookPayload webhookData)
@@ -151,7 +166,7 @@ namespace Consumer.Controllers
                     break;
                 // Add more event handlers as needed
                 default:
-                    _logger.LogInformation($"Unhandled event type: {webhookData.EventType}");
+                    _logger.LogInformation("Unhandled event type: {eventType}", webhookData.EventType);
                     break;
             }
         }
@@ -180,6 +195,7 @@ namespace Consumer.Controllers
     {
         public bool Success { get; set; }
         public string EndpointId { get; set; }
+        public string Secret { get; set; }
         public string Message { get; set; }
     }
 
