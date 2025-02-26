@@ -1,80 +1,207 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using System.Security.Cryptography;
-using System.Text.Json;
+using Svix;
+using System.Net;
 using System.Text;
+using System.Text.Json;
 
-namespace WebHookConsumer.Controllers
+namespace Consumer.Controllers
 {
-    public class SvixPayload
-    {
-        public int numberId { get; set; }
-    }
-
     [ApiController]
-    [Route("[controller]")]
+    [Route("api/[controller]")]
     public class ConsumerController : ControllerBase
     {
-        private const string WebhookSecret = "whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD";
+        private readonly ILogger<ConsumerController> _logger;
+        private readonly HttpClient _httpClient;
+        private readonly IConfiguration _configuration;
 
-        [HttpPost]
-        public async Task<IActionResult> ReceiveWebhook()
+        public ConsumerController(
+            ILogger<ConsumerController> logger,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration)
         {
-            // Leer el cuerpo de la solicitud
-            using var reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
+            _logger = logger;
+            _httpClient = httpClientFactory.CreateClient("ProducerApi");
+            _configuration = configuration;
+        }
 
-            // Verificar la firma del webhook
-            if (!VerifyWebhookSignature(Request.Headers, body))
+        [HttpPost("subscribe")]
+        public async Task<IActionResult> Subscribe(SubscriptionSettings settings)
+        {
+            try
             {
-                return BadRequest("Invalid signature");
-            }
+                // Determine the consumer's webhook URL
+                var baseUrl = _configuration["ConsumerApp:BaseUrl"] ?? $"{Request.Scheme}://{Request.Host}";
+                var webhookEndpoint = $"{baseUrl}/api/consumer/receive-webhook";
 
-            // En tu método de controlador
-            var payload = JsonSerializer.Deserialize<SvixPayload>(body);
-            if (payload != null)
-            {
-                Console.WriteLine($"Número recibido: {payload.numberId}");
-                return Ok($"Número {payload.numberId} procesado exitosamente");
+                // Create subscription request - let Svix generate the secret
+                var subscriptionRequest = new
+                {
+                    ConsumerId = settings.ConsumerId ?? "default-consumer",
+                    WebhookUrl = webhookEndpoint,
+                    Secret = "" // Empty string - Svix will generate a valid secret
+                };
+
+                // Send subscription request to the producer
+                var response = await _httpClient.PostAsJsonAsync(
+                    "api/producer/subscribe",
+                    subscriptionRequest);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    return BadRequest(new { Success = false, Message = $"Failed to subscribe: {errorContent}" });
                 }
-            else
-            {
-                return BadRequest("No se pudo deserializar el payload");
-            }
 
+                var result = await response.Content.ReadFromJsonAsync<SubscriptionResult>();
+
+                return Ok(new
+                {
+                    Success = true,
+                    EndpointId = result?.EndpointId,
+                    WebhookUrl = webhookEndpoint,
+                    Message = "Successfully subscribed to webhooks"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error subscribing to webhooks");
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
         }
 
-        private bool VerifyWebhookSignature(IHeaderDictionary headers, string body)
+        [HttpDelete("unsubscribe")]
+        public async Task<IActionResult> Unsubscribe(string endpointId)
         {
-            if (!headers.TryGetValue("svix-signature", out var signatureHeader) ||
-                !headers.TryGetValue("svix-timestamp", out var timestampHeader) ||
-                !headers.TryGetValue("svix-Id", out var svixId))
+            try
             {
-                return false;
+                // Send unsubscription request to the producer
+                var response = await _httpClient.DeleteAsync(
+                    $"api/producer/unsubscribe?endpointId={endpointId}");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    return BadRequest(new { Success = false, Message = $"Failed to unsubscribe: {errorContent}" });
+                }
+
+                return Ok(new { Success = true, Message = "Successfully unsubscribed from webhooks" });
             }
-
-            var timestamp = timestampHeader.ToString();
-            var signatureValue = signatureHeader.ToString().Trim('{', '}');
-            var signatureParts = signatureValue.Split(',');
-
-            if (signatureParts.Length != 2 || !signatureParts[0].StartsWith("v1"))
+            catch (Exception ex)
             {
-                return false;
-            }
-
-            var providedSignature = signatureParts[1];
-
-            string signedContent = $"{svixId}.{timestamp}.{body}";
-            string secret = WebhookSecret;
-
-            //// Extraer la parte base64 del secreto (después del '_')
-            string secretBase64 = secret.Split('_')[1];
-            byte[] secretBytes = Convert.FromBase64String(secretBase64);
-
-            using (var hmac = new HMACSHA256(secretBytes))
-            {
-                byte[] signatureBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(signedContent));
-                return providedSignature == Convert.ToBase64String(signatureBytes);
+                _logger.LogError(ex, "Error unsubscribing from webhooks");
+                return BadRequest(new { Success = false, Message = ex.Message });
             }
         }
+
+        [HttpPost("receive-webhook")]
+        public async Task<IActionResult> ReceiveWebhook([FromBody] JsonElement body)
+        {
+            try
+            {
+                var secret = _configuration["Webhook:Secret"];
+
+                if (string.IsNullOrEmpty(secret))
+                {
+                    return BadRequest(new { Success = false, Message = "Webhook secret not configured" });
+                }
+
+                // Get the Svix headers
+                var svixHeaders = Request.Headers
+                    .Where(h => h.Key.StartsWith("svix-", StringComparison.OrdinalIgnoreCase))
+                    .ToDictionary(h => h.Key, h => h.Value.ToString());
+
+                var payload = JsonSerializer.Serialize(body);
+                _logger.LogInformation("Received webhook payload: {Payload}", payload);
+
+                try
+                {
+                    var webHeaderCollection = new WebHeaderCollection();
+                    foreach (var header in svixHeaders)
+                    {
+                        webHeaderCollection.Add(header.Key, header.Value);
+                    }
+                    var webhook = new Webhook(secret);
+                    webhook.Verify(payload, webHeaderCollection);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Webhook signature verification failed");
+                    return BadRequest(new { Success = false, Message = "Invalid webhook signature" });
+                }
+
+                // Process the webhook
+                var webhookData = JsonSerializer.Deserialize<WebhookPayload>(payload);
+
+                // Process the webhook based on event type
+                await ProcessWebhookAsync(webhookData);
+
+                return Ok(new { Success = true, Message = "Webhook received and processed" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing webhook");
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        [HttpGet("test")]
+        public IActionResult Test()
+        {
+            return Ok("Test successful");
+        }
+
+        private async Task ProcessWebhookAsync(WebhookPayload webhookData)
+        {
+            // Implement your webhook processing logic here
+            // This is where you would handle different event types
+            if (webhookData == null) return;
+
+            switch (webhookData.EventType)
+            {
+                case "user.created":
+                    await HandleUserCreatedAsync(webhookData.Payload);
+                    break;
+                case "order.completed":
+                    await HandleOrderCompletedAsync(webhookData.Payload);
+                    break;
+                // Add more event handlers as needed
+                default:
+                    _logger.LogInformation("Unhandled event type: {eventType}", webhookData.EventType);
+                    break;
+            }
+        }
+
+        private Task HandleUserCreatedAsync(JsonElement payload)
+        {
+            // Implement user creation handling
+            _logger.LogInformation("Processing user.created event");
+            return Task.CompletedTask;
+        }
+
+        private Task HandleOrderCompletedAsync(JsonElement payload)
+        {
+            // Implement order completion handling
+            _logger.LogInformation("Processing order.completed event");
+            return Task.CompletedTask;
+        }
+    }
+
+    public class SubscriptionSettings
+    {
+        public string ConsumerId { get; set; }
+    }
+
+    public class SubscriptionResult
+    {
+        public bool Success { get; set; }
+        public string EndpointId { get; set; }
+        public string Secret { get; set; }
+        public string Message { get; set; }
+    }
+
+    public class WebhookPayload
+    {
+        public string EventType { get; set; }
+        public JsonElement Payload { get; set; }
     }
 }
