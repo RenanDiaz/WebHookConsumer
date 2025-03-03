@@ -1,3 +1,5 @@
+using Consumer.Controllers;
+
 namespace WebHookConsumer
 {
     public class Program
@@ -11,6 +13,9 @@ namespace WebHookConsumer
             builder.Services.AddControllers();
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen();
+
+            // Register the webhook secret store as a singleton
+            builder.Services.AddSingleton<IWebhookSecretStore, InMemoryWebhookSecretStore>();
 
             // Configure HttpClientFactory with ProducerApi and SSL bypass for development
             builder.Services.AddHttpClient("ProducerApi", client =>
