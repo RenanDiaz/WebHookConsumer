@@ -1,8 +1,4 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using Svix;
-using System.Net;
-using System.Text;
-using System.Text.Json;
 
 namespace Consumer.Controllers
 {
@@ -39,7 +35,8 @@ namespace Consumer.Controllers
                 // Create subscription request - let Svix generate the secret
                 var subscriptionRequest = new
                 {
-                    ConsumerId = settings.ConsumerId ?? "default-consumer",
+                    Affiliate = settings.ConsumerName,
+                    Channels = settings.TransactionTypes,
                     WebhookUrl = webhookEndpoint,
                     Secret = "" // Empty string - Svix will generate a valid secret
                 };
@@ -130,116 +127,6 @@ namespace Consumer.Controllers
             }
         }
 
-        [HttpPost("receive-webhook")]
-        public async Task<IActionResult> ReceiveWebhook()
-        {
-            try
-            {
-                var payload = await new StreamReader(Request.Body).ReadToEndAsync();
-                Console.WriteLine($"Received webhook payload: {payload}");
-                var webhookData = JsonSerializer.Deserialize<WebhookPayload>(payload);
-                if (webhookData == null)
-                {
-                    return BadRequest(new { Success = false, Message = "Invalid webhook payload" });
-                }
-                var requestUrl = $"{HttpContext.Request.Scheme}://{HttpContext.Request.Host}{HttpContext.Request.Path}";
-                var secret = await _secretStore.GetSecretAsync(requestUrl);
-                Console.WriteLine($"Retrieved webhook secret {secret} for endpoint {requestUrl}");
-
-                if (string.IsNullOrEmpty(secret))
-                {
-                    _logger.LogWarning("Webhook secret not configured");
-                    return BadRequest(new { Success = false, Message = "Webhook secret not configured" });
-                }
-
-                // Get the Svix headers
-                var svixHeaders = Request.Headers
-                    .Where(h => h.Key.StartsWith("svix-", StringComparison.OrdinalIgnoreCase))
-                    .ToDictionary(h => h.Key, h => h.Value.ToString());
-
-                try
-                {
-                    var webHeaderCollection = new WebHeaderCollection();
-                    foreach (var header in svixHeaders)
-                    {
-                        webHeaderCollection.Add(header.Key, header.Value);
-                    }
-                    var webhook = new Webhook(secret);
-                    webhook.Verify(payload, webHeaderCollection);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Webhook signature verification failed");
-                    return BadRequest(new { Success = false, Message = "Invalid webhook signature" });
-                }
-
-                // Process the webhook based on event type
-                await ProcessWebhookAsync(webhookData);
-
-                return Ok(new { Success = true, Message = "Webhook received and processed" });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error processing webhook");
-                return BadRequest(new { Success = false, Message = ex.Message });
-            }
-        }
-
-        [HttpPost("order/completed")]
-        public async Task<IActionResult> OrderCompleted()
-        {
-            try
-            {
-                var payload = await new StreamReader(Request.Body).ReadToEndAsync();
-                Console.WriteLine($"Received webhook payload: {payload}");
-                var webhookData = JsonSerializer.Deserialize<WebhookPayload>(payload);
-                if (webhookData == null)
-                {
-                    return BadRequest(new { Success = false, Message = "Invalid webhook payload" });
-                }
-                var requestUrl = $"{HttpContext.Request.Scheme}://{HttpContext.Request.Host}{HttpContext.Request.Path}";
-                var secret = await _secretStore.GetSecretAsync(requestUrl);
-                Console.WriteLine($"Retrieved webhook {secret} for endpoint {requestUrl}");
-
-                if (string.IsNullOrEmpty(secret))
-                {
-                    _logger.LogWarning("Webhook secret not configured");
-                    return BadRequest(new { Success = false, Message = "Webhook secret not configured" });
-                }
-
-                // Get the Svix headers
-                var svixHeaders = Request.Headers
-                    .Where(h => h.Key.StartsWith("svix-", StringComparison.OrdinalIgnoreCase))
-                    .ToDictionary(h => h.Key, h => h.Value.ToString());
-
-                try
-                {
-                    var webHeaderCollection = new WebHeaderCollection();
-                    foreach (var header in svixHeaders)
-                    {
-                        webHeaderCollection.Add(header.Key, header.Value);
-                    }
-                    var webhook = new Webhook(secret);
-                    webhook.Verify(payload, webHeaderCollection);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Webhook signature verification failed");
-                    return BadRequest(new { Success = false, Message = "Invalid webhook signature" });
-                }
-
-                // Process the webhook based on event type
-                await ProcessWebhookAsync(webhookData);
-
-                return Ok(new { Success = true, Message = "Webhook received and processed" });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error processing webhook");
-                return BadRequest(new { Success = false, Message = ex.Message });
-            }
-        }
-
         [HttpGet("secrets/restore")]
         public async Task<IActionResult> RestoreSecrets()
         {
@@ -284,52 +171,23 @@ namespace Consumer.Controllers
             }
         }
 
-        [HttpGet("test")]
-        public IActionResult Test()
-        {
-            return Ok("Test successful");
-        }
+    }
 
-        private async Task ProcessWebhookAsync(WebhookPayload webhookData)
-        {
-            // Implement your webhook processing logic here
-            // This is where you would handle different event types
-            if (webhookData == null) return;
-
-            switch (webhookData.EventType)
-            {
-                case "perform.cmd":
-                    await HandlePerformCommand(webhookData);
-                    break;
-                case "order.completed":
-                    await HandleOrderCompletedAsync(webhookData);
-                    break;
-                // Add more event handlers as needed
-                default:
-                    Console.WriteLine($"Unhandled event type: {webhookData.EventType}");
-                    break;
-            }
-        }
-
-        private Task HandlePerformCommand(WebhookPayload payload)
-        {
-            // Implement user creation handling
-            Console.WriteLine("Processing user.created event");
-            return Task.CompletedTask;
-        }
-
-        private Task HandleOrderCompletedAsync(WebhookPayload payload)
-        {
-            // Implement order completion handling
-            Console.WriteLine("Processing order.completed event");
-            return Task.CompletedTask;
-        }
+    public enum TransactionTypes
+    {
+        Public,
+        Deposit,
+        Withdrawal,
+        Authorization,
+        Refund,
+        Domain
     }
 
     public class SubscriptionSettings
     {
-        public string ConsumerId { get; set; }
+        public string ConsumerName { get; set; }
         public string CallbackPath { get; set; }
+        public List<TransactionTypes> TransactionTypes { get; set; }
     }
 
     public class SubscriptionResult
@@ -343,13 +201,6 @@ namespace Consumer.Controllers
     {
         public bool Success { get; set; }
         public string Secret { get; set; }
-    }
-
-    public class WebhookPayload
-    {
-        public string EndpointId { get; set; }
-        public string EventType { get; set; }
-        public string Message { get; set; }
     }
 
     public class EndpointsResponse
