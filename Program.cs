@@ -16,6 +16,7 @@ namespace WebHookConsumer
 
             // Register the webhook secret store as a singleton
             builder.Services.AddSingleton<IWebhookSecretStore, InMemoryWebhookSecretStore>();
+            builder.Services.AddSingleton<IConsumerStatusStore, InMemoryConsumerStatusStore>();
 
             // Configure HttpClientFactory with ProducerApi and SSL bypass for development
             builder.Services.AddHttpClient("ProducerApi", client =>

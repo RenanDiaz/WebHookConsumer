@@ -10,17 +10,20 @@ namespace Consumer.Controllers
         private readonly HttpClient _httpClient;
         private readonly IConfiguration _configuration;
         private readonly IWebhookSecretStore _secretStore;
+        private readonly IConsumerStatusStore _statusStore;
 
         public ConsumerController(
             ILogger<ConsumerController> logger,
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
-            IWebhookSecretStore secretStore = null)
+            IWebhookSecretStore secretStore = null,
+            IConsumerStatusStore statusStore = null)
         {
             _logger = logger;
             _httpClient = httpClientFactory.CreateClient("ProducerApi");
             _configuration = configuration;
             _secretStore = secretStore ?? new InMemoryWebhookSecretStore();
+            _statusStore = statusStore ?? new InMemoryConsumerStatusStore();
         }
 
         [HttpPost("subscribe")]
@@ -171,6 +174,21 @@ namespace Consumer.Controllers
             }
         }
 
+        [HttpPost("status")]
+        public async Task<IActionResult> UpdateStatus([FromBody] StatusPayload payload)
+        {
+            try
+            {
+                await _statusStore.SetConsumerActiveAsync(payload.ConsumerName, payload.IsActive);
+                return Ok(new { Success = true, Message = "Consumer status updated" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating consumer status");
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
     }
 
     public enum TransactionTypes
@@ -215,14 +233,18 @@ namespace Consumer.Controllers
         public string Url { get; set; }
     }
 
-    // Interface for storing webhook secrets
+    public class StatusPayload
+    {
+        public string ConsumerName { get; set; }
+        public bool IsActive { get; set; }
+    }
+
     public interface IWebhookSecretStore
     {
         Task<string> GetSecretAsync(string endpointUrl);
         Task StoreSecretAsync(string endpointUrl, string secret);
     }
 
-    // Simple in-memory implementation for development
     public class InMemoryWebhookSecretStore : IWebhookSecretStore
     {
         private static readonly Dictionary<string, string> _secrets = new Dictionary<string, string>();
@@ -235,6 +257,28 @@ namespace Consumer.Controllers
         public Task StoreSecretAsync(string endpointUrl, string secret)
         {
             _secrets[endpointUrl] = secret;
+            return Task.CompletedTask;
+        }
+    }
+
+    public interface IConsumerStatusStore
+    {
+        Task<bool> IsConsumerActiveAsync(string consumerName);
+        Task SetConsumerActiveAsync(string consumerName, bool isActive);
+    }
+
+    public class InMemoryConsumerStatusStore : IConsumerStatusStore
+    {
+        private static readonly Dictionary<string, bool> _status = new Dictionary<string, bool>();
+
+        public Task<bool> IsConsumerActiveAsync(string consumerName)
+        {
+            return Task.FromResult(_status.TryGetValue(consumerName, out var isActive) && isActive != false);
+        }
+
+        public Task SetConsumerActiveAsync(string consumerName, bool isActive)
+        {
+            _status[consumerName] = isActive;
             return Task.CompletedTask;
         }
     }

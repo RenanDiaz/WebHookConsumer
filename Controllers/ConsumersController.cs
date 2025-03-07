@@ -12,17 +12,20 @@ namespace Consumer.Controllers
         private readonly HttpClient _httpClient;
         private readonly IConfiguration _configuration;
         private readonly IWebhookSecretStore _secretStore;
+        protected readonly IConsumerStatusStore _statusStore;
 
         public ConsumersController(
             ILogger<ConsumersController> logger,
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
-            IWebhookSecretStore secretStore = null)
+            IWebhookSecretStore secretStore = null,
+            IConsumerStatusStore statusStore = null)
         {
             _logger = logger;
             _httpClient = httpClientFactory.CreateClient("ProducerApi");
             _configuration = configuration;
             _secretStore = secretStore ?? new InMemoryWebhookSecretStore();
+            _statusStore = statusStore ?? new InMemoryConsumerStatusStore();
         }
 
         public async Task<IActionResult> ProcessTransactionWebhook()
